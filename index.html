@@ -49,7 +49,8 @@ main{padding:12px 14px 0;display:flex;flex-direction:column;gap:12px}
 .label .n{color:#5f6b7a}
 textarea,input{width:100%;background:#0f141b;border:1px solid #26303d;border-radius:11px;color:#e6e9ef;padding:11px 12px;font-size:16px;font-family:inherit;outline:none}
 textarea:focus,input:focus{border-color:#3b82f6}
-textarea{resize:vertical;min-height:92px;line-height:1.6}
+textarea{resize:none;min-height:92px;max-height:46vh;line-height:1.6;overflow-y:auto}
+.count{font-size:12px;color:#6b7686;margin:6px 0 0;min-height:15px}
 .row{display:flex;gap:8px;margin-top:9px}
 .row.wrap{flex-wrap:wrap}
 button{font-family:inherit;font-size:15px;font-weight:600;border:none;border-radius:12px;padding:12px 15px;color:#0b0f14;background:#e6e9ef;cursor:pointer;transition:opacity .15s}
@@ -124,12 +125,14 @@ button.chipbtn{font-size:13px;font-weight:500;padding:7px 12px;background:#18202
 <main>
   <section class="card">
     <textarea id="input" placeholder="粘贴或输入聊天内容…&#10;一条消息一行"></textarea>
+    <p id="inputCount" class="count"></p>
     <div class="row">
       <button id="btnThem" class="ghost half">对方说的</button>
       <button id="btnMe" class="ghost half">我说的</button>
     </div>
     <div class="row">
-      <button id="btnBulk" class="ghost" style="flex:1">整段粘贴（自动判断谁说的）</button>
+      <button id="btnPaste" class="ghost half">从剪贴板粘贴</button>
+      <button id="btnBulk" class="ghost half">整段（自动判断）</button>
     </div>
     <div class="row">
       <button id="btnAnalyze" class="primary">生成建议</button>
@@ -523,9 +526,43 @@ button.chipbtn{font-size:13px;font-weight:500;padding:7px 12px;background:#18202
 
   // ── 消息操作 ───────────────────────────────────────────
 
+  // 微信/系统复制出来的换行并不统一：\r\n、单独 \r、U+2028/U+2029 都见过，
+  // 少认一种就会把整段当成一行，所以这里全部当分隔符。
+  var LINE_BREAK = /\r\n|\r|\n|\u2028|\u2029/
+
+  function cleanLine(s) {
+    return String(s == null ? '' : s).replace(/[\u200b\ufeff]/g, '').trim()
+  }
+
+  function updateCount() {
+    var v = $('input').value
+    if (!v) { $('inputCount').textContent = ''; return }
+    var n = v.split(LINE_BREAK).filter(function (s) { return cleanLine(s).length > 0 }).length
+    $('inputCount').textContent = '共 ' + n + ' 行 · ' + v.length + ' 字'
+  }
+
+  function autoGrow() {
+    var el = $('input')
+    el.style.height = 'auto'
+    var max = Math.round(window.innerHeight * 0.46)
+    el.style.height = Math.min(el.scrollHeight, max) + 'px'
+  }
+
+  function insertIntoInput(text) {
+    var el = $('input')
+    var start = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length
+    var end = typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length
+    var v = el.value
+    el.value = v.slice(0, start) + text + v.slice(end)
+    var pos = start + text.length
+    try { el.selectionStart = el.selectionEnd = pos } catch (e) { /* 某些环境不支持选区 */ }
+    updateCount()
+    autoGrow()
+  }
+
   function addMessages(role, raw) {
     if (!state.current) { toast('先新建一个联系人'); return }
-    var lines = String(raw || '').split(/\r?\n/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
+    var lines = String(raw || '').split(LINE_BREAK).map(cleanLine).filter(function (s) { return s.length > 0 })
     if (!lines.length) { toast('先粘点内容进来'); return }
     var entry = ensureContact(state.current)
     var now = Date.now()
@@ -535,6 +572,8 @@ button.chipbtn{font-size:13px;font-weight:500;padding:7px 12px;background:#18202
     if (entry.messages.length > 200) entry.messages = entry.messages.slice(-200)
     entry.updatedAt = now
     $('input').value = ''
+    updateCount()
+    autoGrow()
     showErr('')
     saveState()
     renderAll()
@@ -780,6 +819,37 @@ button.chipbtn{font-size:13px;font-weight:500;padding:7px 12px;background:#18202
     if (e.key === 'Enter') { e.preventDefault(); createContact() }
   })
 
+  $('input').addEventListener('input', function () { updateCount(); autoGrow() })
+
+  // iOS 从微信粘大段文本时，默认粘贴可能只落一部分（尤其中间有空行）。
+  // 自己接管 paste、只取纯文本、按光标插入，绕开系统那套富文本处理。
+  $('input').addEventListener('paste', function (e) {
+    var cd = e.clipboardData || window.clipboardData
+    if (!cd) return
+    var text = ''
+    try { text = cd.getData('text/plain') || cd.getData('text') || '' } catch (err) { text = '' }
+    if (!text) return
+    e.preventDefault()
+    insertIntoInput(text)
+  })
+
+  $('btnPaste').addEventListener('click', function () {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      toast('系统不让直接读剪贴板，请长按输入框粘贴')
+      return
+    }
+    navigator.clipboard.readText().then(function (t) {
+      if (!t) { toast('剪贴板是空的'); return }
+      var cur = $('input').value
+      var needNl = cur && !/[\n\r]$/.test(cur)
+      insertIntoInput((needNl ? '\n' : '') + t)
+      var n = t.split(LINE_BREAK).filter(function (s) { return cleanLine(s).length > 0 }).length
+      toast('已粘贴 ' + n + ' 行')
+    }).catch(function () {
+      toast('读剪贴板被拒绝，长按输入框手动粘贴')
+    })
+  })
+
   $('btnThem').addEventListener('click', function () { addMessages('them', $('input').value) })
   $('btnMe').addEventListener('click', function () { addMessages('me', $('input').value) })
   $('btnBulk').addEventListener('click', function () { addMessages('unknown', $('input').value) })
@@ -814,6 +884,8 @@ button.chipbtn{font-size:13px;font-weight:500;padding:7px 12px;background:#18202
     if (names.length) { state.current = names[0]; saveState() }
   }
   renderAll()
+  updateCount()
+  autoGrow()
 })();
 </script>
 </body>
